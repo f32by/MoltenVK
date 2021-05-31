@@ -72,103 +72,94 @@ constexpr bool isAny(size_t value, std::initializer_list<size_t> desired) {
  * Vulkan command to begin a render pass.
  * Template class to balance vector pre-allocations between very common low counts and fewer larger counts.
  */
-template <size_t N_CV, size_t N_A,
-		  bool COND_CV = isAny(N_CV, {1, 2, 9}),
-		  bool COND_A = isAny(N_A, {0, 1, 2, 9})>
-class MVKCmdBeginRenderPass : public MVKCmdBeginRenderPassBase {
+template <size_t N_CV, size_t N_A, typename = void, typename = void>
+class MVKCmdBeginRenderPass {};
 
+template <size_t N_CV, size_t N_A>
+class MVKCmdBeginRenderPass<N_CV, N_A,
+                            typename std::enable_if<isAny(N_CV, {1, 2, 9})>::type,
+							typename std::enable_if<isAny(N_A, {0, 1, 2, 9})>::type
+							> : public MVKCmdBeginRenderPassBase {
 public:
 	VkResult setContent(MVKCommandBuffer* cmdBuff,
 						const VkRenderPassBeginInfo* pRenderPassBegin,
-						VkSubpassContents contents);
+						VkSubpassContents contents) {
+		MVKCmdBeginRenderPassBase::setContent(cmdBuff, pRenderPassBegin, contents);
+
+		// Add clear values
+		uint32_t cvCnt = pRenderPassBegin->clearValueCount;
+		_clearValues.clear();	// Clear for reuse
+		_clearValues.reserve(cvCnt);
+		for (uint32_t i = 0; i < cvCnt; i++) {
+			_clearValues.push_back(pRenderPassBegin->pClearValues[i]);
+		}
+
+		bool imageless = false;
+		for (auto* next = (const VkBaseInStructure*)pRenderPassBegin->pNext; next; next = next->pNext) {
+			switch (next->sType) {
+			case VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO: {
+				const auto* pAttachmentBegin = (VkRenderPassAttachmentBeginInfo*)next;
+				for(uint32_t i = 0; i < pAttachmentBegin->attachmentCount; i++) {
+					_attachments.push_back((MVKImageView*)pAttachmentBegin->pAttachments[i]);
+				}
+				imageless = true;
+				break;
+			}
+			default:
+				break;
+			}
+		}
+
+		if (!imageless) {
+			for(uint32_t i = 0; i < _framebuffer->getAttachmentCount(); i++) {
+				_attachments.push_back((MVKImageView*)_framebuffer->getAttachment(i));
+			}
+		}
+
+		return VK_SUCCESS;
+	}
+
 	VkResult setContent(MVKCommandBuffer* cmdBuff,
 						const VkRenderPassBeginInfo* pRenderPassBegin,
-						const VkSubpassBeginInfo* pSubpassBeginInfo);
+						const VkSubpassBeginInfo* pSubpassBeginInfo) {
+		return setContent(cmdBuff, pRenderPassBegin, pSubpassBeginInfo->contents);
+	}
 
-	void encode(MVKCommandEncoder* cmdEncoder) override;
+	void encode(MVKCommandEncoder* cmdEncoder) override {
+		//	MVKLogDebug("Encoding vkCmdBeginRenderPass(). Elapsed time: %.6f ms.", mvkGetElapsedMilliseconds());
+		cmdEncoder->beginRenderpass(this,
+									_contents,
+									_renderPass,
+									_framebuffer->getExtent2D(),
+									_framebuffer->getLayerCount(),
+									_renderArea,
+									_clearValues.contents(),
+									_attachments.contents());
+	};
 
 protected:
 	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
 
 	MVKSmallVector<VkClearValue, N_CV> _clearValues;
-    MVKSmallVector<MVKImageView*, N_A> _attachments;
+	MVKSmallVector<MVKImageView*, N_A> _attachments;
 };
 
-template <size_t N_CV, size_t N_A, bool COND_CV, bool COND_A>
-VkResult MVKCmdBeginRenderPass<N_CV, N_A, COND_CV, COND_A>::setContent(MVKCommandBuffer* cmdBuff,
-																	   const VkRenderPassBeginInfo* pRenderPassBegin,
-																	   VkSubpassContents contents) {
-	MVKCmdBeginRenderPassBase::setContent(cmdBuff, pRenderPassBegin, contents);
-
-	// Add clear values
-	uint32_t cvCnt = pRenderPassBegin->clearValueCount;
-	_clearValues.clear();	// Clear for reuse
-	_clearValues.reserve(cvCnt);
-	for (uint32_t i = 0; i < cvCnt; i++) {
-		_clearValues.push_back(pRenderPassBegin->pClearValues[i]);
-	}
-
-	bool imageless = false;
-	for (auto* next = (const VkBaseInStructure*)pRenderPassBegin->pNext; next; next = next->pNext) {
-		switch (next->sType) {
-		case VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO: {
-			const auto* pAttachmentBegin = (VkRenderPassAttachmentBeginInfo*)next;
-			for(uint32_t i = 0; i < pAttachmentBegin->attachmentCount; i++) {
-				_attachments.push_back((MVKImageView*)pAttachmentBegin->pAttachments[i]);
-			}
-			imageless = true;
-			break;
-		}
-		default:
-			break;
-		}
-	}
-	
-	if (!imageless) {
-		for(uint32_t i = 0; i < _framebuffer->getAttachmentCount(); i++) {
-			_attachments.push_back((MVKImageView*)_framebuffer->getAttachment(i));
-		}
-	}
-
-	return VK_SUCCESS;
-}
-
-template <size_t N_CV, size_t N_A, bool COND_CV, bool COND_A>
-VkResult MVKCmdBeginRenderPass<N_CV, N_A, COND_CV, COND_A>::setContent(MVKCommandBuffer* cmdBuff,
-																	   const VkRenderPassBeginInfo* pRenderPassBegin,
-																	   const VkSubpassBeginInfo* pSubpassBeginInfo) {
-	return setContent(cmdBuff, pRenderPassBegin, pSubpassBeginInfo->contents);
-}
-
-template <size_t N_CV, size_t N_A, bool COND_CV, bool COND_A>
-void MVKCmdBeginRenderPass<N_CV, N_A, COND_CV, COND_A>::encode(MVKCommandEncoder* cmdEncoder) {
-//	MVKLogDebug("Encoding vkCmdBeginRenderPass(). Elapsed time: %.6f ms.", mvkGetElapsedMilliseconds());
-	cmdEncoder->beginRenderpass(this,
-								_contents,
-								_renderPass,
-								_framebuffer->getExtent2D(),
-								_framebuffer->getLayerCount(),
-								_renderArea,
-								_clearValues.contents(),
-								_attachments.contents());
-}
-
 // Concrete template class implementations.
-typedef MVKCmdBeginRenderPass<1, 0, true, true> MVKCmdBeginRenderPass10;
-typedef MVKCmdBeginRenderPass<2, 0, true, true> MVKCmdBeginRenderPass20;
-typedef MVKCmdBeginRenderPass<9, 0, true, true> MVKCmdBeginRenderPassMulti0;
+typedef MVKCmdBeginRenderPass<1, 0> MVKCmdBeginRenderPass10;
+typedef MVKCmdBeginRenderPass<2, 0> MVKCmdBeginRenderPass20;
+typedef MVKCmdBeginRenderPass<9, 0> MVKCmdBeginRenderPassMulti0;
 
-typedef MVKCmdBeginRenderPass<1, 1, true, true> MVKCmdBeginRenderPass11;
-typedef MVKCmdBeginRenderPass<2, 1, true, true> MVKCmdBeginRenderPass21;
-typedef MVKCmdBeginRenderPass<9, 1, true, true> MVKCmdBeginRenderPassMulti1;
+typedef MVKCmdBeginRenderPass<1, 1> MVKCmdBeginRenderPass11;
+typedef MVKCmdBeginRenderPass<2, 1> MVKCmdBeginRenderPass21;
+typedef MVKCmdBeginRenderPass<9, 1> MVKCmdBeginRenderPassMulti1;
 
-typedef MVKCmdBeginRenderPass<1, 2, true, true> MVKCmdBeginRenderPass12;
-typedef MVKCmdBeginRenderPass<2, 2, true, true> MVKCmdBeginRenderPass22;
-typedef MVKCmdBeginRenderPass<9, 2, true, true> MVKCmdBeginRenderPassMulti2;
+typedef MVKCmdBeginRenderPass<1, 2> MVKCmdBeginRenderPass12;
+typedef MVKCmdBeginRenderPass<2, 2> MVKCmdBeginRenderPass22;
+typedef MVKCmdBeginRenderPass<9, 2> MVKCmdBeginRenderPassMulti2;
 
-typedef MVKCmdBeginRenderPass<1, 9, true, true> MVKCmdBeginRenderPass1Multi;
-typedef MVKCmdBeginRenderPass<2, 9, true, true> MVKCmdBeginRenderPass2Multi;
-typedef MVKCmdBeginRenderPass<9, 9, true, true> MVKCmdBeginRenderPassMultiMulti;
+typedef MVKCmdBeginRenderPass<1, 9> MVKCmdBeginRenderPass1Multi;
+typedef MVKCmdBeginRenderPass<2, 9> MVKCmdBeginRenderPass2Multi;
+typedef MVKCmdBeginRenderPass<9, 9> MVKCmdBeginRenderPassMultiMulti;
 
 
 #pragma mark -
